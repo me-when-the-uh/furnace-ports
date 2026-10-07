@@ -16,12 +16,12 @@ class DivPlatformC352: public DivDispatch {
     int pan[4];
     bool setPos, volChanged;
     Channel(bool linear=true): SharedChannel(255,linear), sample(-1), audPos(0),
-      macroVolMul(64), macroPanMul(127), pan{255,255,255,255}, setPos(false), volChanged(true) {}
+      macroVolMul(64), macroPanMul(127), pan{255,255,0,0}, setPos(false), volChanged(true) {}
   };
   struct SampleRegion {
-    unsigned int base, length, loopStart, loopEnd;
+    unsigned int base, length, loopStart, loopEnd, link;
     bool loaded, loop, pingPong, mulaw;
-    SampleRegion(): base(0), length(0), loopStart(0), loopEnd(0),
+    SampleRegion(): base(0), length(0), loopStart(0), loopEnd(0), link(0),
       loaded(false), loop(false), pingPong(false), mulaw(false) {}
   };
   struct Write { unsigned int address; unsigned short value; };
@@ -30,6 +30,7 @@ class DivPlatformC352: public DivDispatch {
   bool isMuted[32];
   C352Core core;
   DivPitchTableManager samplePitchTable;
+  unsigned char mulawByte[65536];
   std::vector<unsigned char> sampleMem;
   std::vector<SampleRegion> regions;
   size_t sampleMemLen;

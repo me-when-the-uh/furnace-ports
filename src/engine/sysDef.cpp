@@ -2522,9 +2522,9 @@ void DivEngine::registerSystems() {
   );
 
   sysDefs[DIV_SYSTEM_C352]=new DivSysDef(
-    _("Namco C352"), NULL, 0xe8, 0, 32, 32, 32,
-    false, true, 0, false, (1U<<DIV_SAMPLE_DEPTH_8BIT)|(1U<<DIV_SAMPLE_DEPTH_C219), 0, 0,
-    _("Namco's 32-voice PCM chip with four outputs.\nVGM export is not supported."),
+    _("Namco C352"), NULL, 0xd0, 0, 32, 32, 32,
+    false, true, 0x171, false, (1U<<DIV_SAMPLE_DEPTH_8BIT)|(1U<<DIV_SAMPLE_DEPTH_MULAW)|(1U<<DIV_SAMPLE_DEPTH_C219)|(1U<<DIV_SAMPLE_DEPTH_16BIT), 0, 0,
+    _("Namco's 32-voice PCM chip with four outputs."),
     DivChanDefFunc(stockChanDef<DIV_CH_PCM,DIV_INS_C352,DIV_INS_AMIGA>),
     {}
   );

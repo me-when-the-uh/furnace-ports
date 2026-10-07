@@ -7,6 +7,7 @@
 #include "../engine.h"
 #include "../../ta-log.h"
 #include <algorithm>
+#include <utility>
 
 namespace {
 const char* regSheet[]={
@@ -24,6 +25,7 @@ DivPlatformC352::DivPlatformC352(): sampleMem(C352Core::ROM_SIZE,0),
   std::fill(isMuted,isMuted+32,false);
   std::fill(regPool,regPool+0x203,0);
   core.setROM(sampleMem.data(),sampleMem.size());
+  for (unsigned b=0; b<256; b++) mulawByte[uint16_t(core.mulaw[b])]=b;
 }
 
 DivPlatformC352::~DivPlatformC352() {
@@ -50,10 +52,10 @@ void DivPlatformC352::acquire(short** buf, size_t len) {
     flushWrites();
     core.tick();
     if (quadOutput) {
-      for (int o=0; o<4; o++) buf[o][h]=core.output[o];
+      for (int o=0; o<4; o++) buf[o][h]=CLAMP(core.output[o],-32768,32767);
     } else {
-      buf[0][h]=(int(core.output[0])+core.output[2])/2;
-      buf[1][h]=(int(core.output[1])+core.output[3])/2;
+      buf[0][h]=CLAMP(int(core.output[0])+core.output[2],-32768,32767);
+      buf[1][h]=CLAMP(int(core.output[1])+core.output[3],-32768,32767);
     }
     for (int i=0; i<32; i++) {
       int value=0;
@@ -83,11 +85,11 @@ void DivPlatformC352::tick(bool sysTick) {
       c.freqChanged=true;
     }
     if (c.std.panL.had) {
-      c.pan[0]=c.pan[2]=255*CLAMP(c.std.panL.val,0,c.macroPanMul)/c.macroPanMul;
+      c.pan[0]=255*CLAMP(c.std.panL.val,0,c.macroPanMul)/c.macroPanMul;
       c.volChanged=true;
     }
     if (c.std.panR.had) {
-      c.pan[1]=c.pan[3]=255*CLAMP(c.std.panR.val,0,c.macroPanMul)/c.macroPanMul;
+      c.pan[1]=255*CLAMP(c.std.panR.val,0,c.macroPanMul)/c.macroPanMul;
       c.volChanged=true;
     }
     if (c.std.phaseReset.had && c.std.phaseReset.val==1 && c.active) {
@@ -113,10 +115,16 @@ void DivPlatformC352::tick(bool sysTick) {
         const unsigned base=s->base;
         write(i*8+4,base>>16);
         write(i*8+5,(base+c.audPos)&0xffff);
-        write(i*8+6,(base+(s->loop ? s->loopEnd-1 : s->length))&0xffff);
-        write(i*8+7,(base+s->loopStart)&0xffff);
+        if (s->link) {
+          write(i*8+6,(base+s->loopStart-1)&0xffff);
+          write(i*8+7,s->link&0xffff);
+        } else {
+          write(i*8+6,(base+(s->loop ? s->loopEnd-1 : s->length))&0xffff);
+          write(i*8+7,(base+s->loopStart)&0xffff);
+        }
         const unsigned flags=C352Core::KEYON|(s->mulaw ? C352Core::MULAW : 0)|
-          (s->loop ? C352Core::LOOP : 0)|(s->pingPong ? C352Core::REVERSE : 0);
+          (s->loop ? C352Core::LOOP : 0)|(s->pingPong ? C352Core::REVERSE : 0)|
+          (s->link ? C352Core::LINK : 0);
         write(i*8+3,flags);
         c.keyOff=false;
       } else {
@@ -143,14 +151,39 @@ void DivPlatformC352::renderSamples(int chipID) {
   sampleMemLen=0;
   memCompo=DivMemoryComposition();
   memCompo.name="Sample ROM";
+
+  // 16-bit bodies hold the mu-law-decoded values.
+  auto emit=[&](unsigned char* dst, DivSample* s, unsigned from, unsigned count) {
+    if (s->depth==DIV_SAMPLE_DEPTH_16BIT) {
+      for (unsigned j=0; j<count; j++) dst[j]=mulawByte[uint16_t(s->data16[from+j])];
+    } else if (s->depth==DIV_SAMPLE_DEPTH_MULAW) {
+      std::copy(s->dataMuLaw+from,s->dataMuLaw+from+count,dst);
+    } else if (s->depth==DIV_SAMPLE_DEPTH_C219) {
+      std::copy(s->dataC219+from,s->dataC219+from+count,dst);
+    } else {
+      std::copy(s->data8+from,s->data8+from+count,dst);
+    }
+  };
+
+  std::vector<std::pair<size_t,size_t>> used;
+  auto overlaps=[&](size_t s, size_t e) {
+    for (const auto& u: used) if (s<u.second && e>u.first) return true;
+    return false;
+  };
+
   for (int i=0; i<parent->song.sampleLen; i++) {
     DivSample* s=parent->song.sample[i];
     if (!s->renderOn[0][chipID]) continue;
+    unsigned length;
+    if (s->depth==DIV_SAMPLE_DEPTH_16BIT) length=s->samples;
+    else if (s->depth==DIV_SAMPLE_DEPTH_MULAW) length=s->lengthMuLaw;
+    else if (s->depth==DIV_SAMPLE_DEPTH_C219) length=s->lengthC219;
+    else length=s->length8;
     SampleRegion r;
-    r.length=s->samples;
-    r.mulaw=s->depth==DIV_SAMPLE_DEPTH_C219;
+    r.length=length;
+    r.mulaw=s->depth==DIV_SAMPLE_DEPTH_16BIT||s->depth==DIV_SAMPLE_DEPTH_MULAW||s->depth==DIV_SAMPLE_DEPTH_C219;
     r.loop=s->loop;
-    if (!r.length || (r.loop && (s->loopStart<0 || s->loopEnd<=s->loopStart || unsigned(s->loopEnd)>r.length))) {
+    if (!length || (r.loop && (s->loopStart<0 || s->loopEnd<=s->loopStart || unsigned(s->loopEnd)>length))) {
       logW("C352: empty sample or invalid loop in sample %d",i);
       continue;
     }
@@ -158,15 +191,42 @@ void DivPlatformC352::renderSamples(int chipID) {
       logW("C352: backward sample loops are not supported (%d)",i);
       continue;
     }
-    const unsigned size=r.length+(r.loop ? 0 : 1);
-    if (r.length>65536 || size>65536) {
-      logW("C352: sample %d does not fit a 64 KiB bank",i);
+    if (r.loop && length>65536 && s->loopStart>0) {
+      // intro and loop region in separate banks, both ending on the same low
+      // 16 bits. the LINK jump then lands on the loop region.
+      const unsigned L1=s->loopStart, L2=length-L1;
+      bool placed=false;
+      for (unsigned b=1; b<=0xff && !placed; b++) {
+        const size_t s2=(size_t(b)<<16)|((b+L1-L2)&0xffff);
+        if (s2+L2>sampleMem.size() || overlaps(s2,s2+L2)) continue;
+        for (size_t base=0; base+L1<=sampleMem.size(); base+=0x10000) {
+          const size_t s1=base+b;
+          if (s1+L1>sampleMem.size()) break;
+          if (overlaps(s1,s1+L1) || (s1<s2+L2 && s2<s1+L1)) continue;
+          emit(sampleMem.data()+s1,s,0,L1);
+          emit(sampleMem.data()+s2,s,L1,L2);
+          used.emplace_back(s1,s1+L1);
+          used.emplace_back(s2,s2+L2);
+          r.base=s1;
+          r.link=s2;
+          r.length=L1;
+          r.loopStart=L1;
+          r.loopEnd=L1;
+          r.loaded=true;
+          regions[i]=r;
+          sampleMemLen=std::max(sampleMemLen,std::max(s1+L1,s2+L2));
+          memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_SAMPLE,"Sample",i,s1,s1+L1));
+          memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_SAMPLE,"Sample (loop)",i,s2,s2+L2));
+          placed=true;
+          break;
+        }
+      }
+      if (!placed) logW("C352: could not place sample %d",i);
       continue;
     }
-    const unsigned char* data=r.mulaw ? s->dataC219 : reinterpret_cast<const unsigned char*>(s->data8);
-    const unsigned length=r.mulaw ? s->lengthC219 : s->length8;
-    if (!data || length<r.length) {
-      logW("C352: sample %d has no rendered PCM data",i);
+    const unsigned size=length+(r.loop ? 0 : 1);
+    if (length>65536 || size>65536) {
+      logW("C352: sample %d does not fit a 64 KiB bank",i);
       continue;
     }
     size_t pos=sampleMemLen;
@@ -177,10 +237,11 @@ void DivPlatformC352::renderSamples(int chipID) {
     }
     r.base=pos;
     r.loopStart=r.loop ? s->loopStart : 0;
-    r.loopEnd=r.loop ? s->loopEnd : r.length;
+    r.loopEnd=r.loop ? s->loopEnd : length;
     r.pingPong=r.loop && s->loopMode==DIV_SAMPLE_LOOP_PINGPONG && r.loopEnd-r.loopStart>1;
     r.loaded=true;
-    std::copy(data,data+r.length,sampleMem.begin()+pos);
+    emit(sampleMem.data()+pos,s,0,length);
+    used.emplace_back(pos,pos+length);
     regions[i]=r;
     sampleMemLen=pos+size;
     memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_SAMPLE,"Sample",i,pos,sampleMemLen));
@@ -222,7 +283,7 @@ unsigned char* DivPlatformC352::getRegisterPool() {
 int DivPlatformC352::getRegisterPoolSize() { return 0x203; }
 int DivPlatformC352::getRegisterPoolDepth() { return 16; }
 const char** DivPlatformC352::getRegisterSheet() { return regSheet; }
-float DivPlatformC352::getPostAmp() { return 1.0f; }
+float DivPlatformC352::getPostAmp() { return 6.0f; }
 void DivPlatformC352::notifyInsChange(int ins) {
   for (auto& c: chan) if (c.ins==ins) c.insChanged=true;
 }
@@ -335,8 +396,8 @@ int DivPlatformC352::dispatch(DivCommand c) {
       return chan[c.chan].outVol;
       break;
     case DIV_CMD_PANNING:
-      chan[c.chan].pan[0]=chan[c.chan].pan[2]=CLAMP(c.value,0,255);
-      chan[c.chan].pan[1]=chan[c.chan].pan[3]=CLAMP(c.value2,0,255);
+      chan[c.chan].pan[0]=CLAMP(c.value,0,255);
+      chan[c.chan].pan[1]=CLAMP(c.value2,0,255);
       chan[c.chan].volChanged=true;
       break;
     case DIV_CMD_SURROUND_PANNING:
